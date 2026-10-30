@@ -4,7 +4,7 @@ subroutine init_output_dir
 
     integer :: values(8), ios, unit_id
     logical :: exists
-    character(len=256) :: latest_file
+    character(len=256) :: latest_file, case_name
     character(len=512) :: cmd
 
     output_root = 'output'
@@ -27,9 +27,14 @@ subroutine init_output_dir
         endif
     endif
 
-    call date_and_time(values=values)
-    write(output_dir,'(a,"/run_",i4.4,i2.2,i2.2,"_",i2.2,i2.2,i2.2,"_",i3.3)') &
-        trim(output_root), values(1), values(2), values(3), values(5), values(6), values(7), values(8)
+    if (motion_source_kind.eq.motion_source_file) then
+        call resolve_offline_motion_file(case_name)
+        output_dir = trim(output_root) // '/' // trim(case_name)
+    else
+        call date_and_time(values=values)
+        write(output_dir,'(a,"/run_",i4.4,i2.2,i2.2,"_",i2.2,i2.2,i2.2,"_",i3.3)') &
+            trim(output_root), values(1), values(2), values(3), values(5), values(6), values(7), values(8)
+    endif
 
     cmd = 'mkdir -p ' // trim(output_dir)
     call system(trim(cmd))
@@ -40,6 +45,126 @@ subroutine init_output_dir
         write(unit_id, '(A)') trim(output_dir)
         close(unit_id)
     endif
+end subroutine
+
+subroutine resolve_offline_motion_file(case_name)
+    use com_date
+    implicit none
+
+    character(len=*), intent(out) :: case_name
+    integer :: values(8), unit_id, ios, count, dot_pos, i, k_pos, st_pos, slash_pos, env_status
+    logical :: exists
+    character(len=64) :: k_text
+    character(len=256) :: filename
+    character(len=512) :: line, list_file, cmd, selected_file
+
+    selected_file = ''
+    if (command_argument_count() .ge. 1) then
+        call get_command_argument(1, selected_file)
+    endif
+    if (len_trim(selected_file) .eq. 0) then
+        call get_environment_variable('LBM_MOTION_FILE', selected_file, status=env_status)
+        if (env_status .ne. 0) selected_file = ''
+    endif
+
+    if (len_trim(selected_file) .gt. 0) then
+        if (index(selected_file, '/') .eq. 0) then
+            motion_file = 'input/' // trim(selected_file)
+        else
+            motion_file = trim(selected_file)
+        endif
+
+        inquire(file=trim(motion_file), exist=exists)
+        if (.not. exists) then
+            write(*,*) '指定的离线运动输入文件不存在: ', trim(motion_file)
+            stop 1
+        endif
+
+        slash_pos = 0
+        do i = len_trim(motion_file), 1, -1
+            if (motion_file(i:i) .eq. '/') then
+                slash_pos = i
+                exit
+            endif
+        enddo
+        filename = motion_file(slash_pos+1:len_trim(motion_file))
+    else
+        call date_and_time(values=values)
+        write(list_file,'("/tmp/lbm_input_files_",i4.4,i2.2,i2.2,"_",i2.2,i2.2,i2.2,"_",i3.3,".txt")') &
+            values(1), values(2), values(3), values(5), values(6), values(7), values(8)
+
+        cmd = 'find input -maxdepth 1 -type f -printf "%f\n" > ' // trim(list_file)
+        call system(trim(cmd))
+
+        unit_id = 904
+        open(unit_id, file=trim(list_file), status='old', action='read', iostat=ios)
+        if (ios .ne. 0) then
+            write(*,*) '无法读取 input 文件列表，请确认当前目录下存在 input 文件夹'
+            stop 1
+        endif
+
+        count = 0
+        filename = ''
+        do
+            read(unit_id, '(A)', iostat=ios) line
+            if (ios .ne. 0) exit
+            if (len_trim(line) .eq. 0) cycle
+            count = count + 1
+            filename = trim(line)
+        enddo
+        close(unit_id)
+
+        cmd = 'rm -f ' // trim(list_file)
+        call system(trim(cmd))
+
+        if (count .lt. 1) then
+            write(*,*) 'input 文件夹中没有离线运动输入文件'
+            stop 1
+        elseif (count .gt. 1) then
+            write(*,*) 'input 文件夹中只能包含一个离线运动输入文件，当前数量为: ', count
+            stop 1
+        endif
+
+        motion_file = 'input/' // trim(filename)
+    endif
+    k_pos = 0
+    st_pos = 0
+    do i = 1, len_trim(filename)
+        if ((filename(i:i) .eq. 'k') .or. (filename(i:i) .eq. 'K')) then
+            k_pos = i
+            exit
+        endif
+    enddo
+    if (k_pos .gt. 0) then
+        do i = k_pos + 1, len_trim(filename) - 1
+            if (((filename(i:i) .eq. 's') .or. (filename(i:i) .eq. 'S')) .and. &
+                ((filename(i+1:i+1) .eq. 't') .or. (filename(i+1:i+1) .eq. 'T'))) then
+                st_pos = i
+                exit
+            endif
+        enddo
+    endif
+    if ((k_pos .lt. 1) .or. (st_pos .le. k_pos + 1)) then
+        write(*,*) '无法从输入文件名解析流场保存用的 k 值，文件名应类似 k2.0st0.2.dat: ', trim(filename)
+        stop 1
+    endif
+
+    k_text = filename(k_pos+1:st_pos-1)
+    read(k_text, *, iostat=ios) flow_save_k
+    if ((ios .ne. 0) .or. (flow_save_k .le. 0.0d0)) then
+        write(*,*) '输入文件名中的 k 值无效: ', trim(k_text), ' file=', trim(filename)
+        stop 1
+    endif
+
+    case_name = trim(filename)
+    dot_pos = 0
+    do i = len_trim(case_name), 1, -1
+        if (case_name(i:i) .eq. '.') then
+            dot_pos = i
+            exit
+        endif
+    enddo
+    if (dot_pos .gt. 1) case_name = case_name(1:dot_pos-1)
 end subroutine
 
 subroutine build_output_path(filename, path)
@@ -111,7 +236,9 @@ subroutine load_motion_table
 
     if (motion_loaded) return
 
-    motion_file = 'motion_params.dat'
+    if (len_trim(motion_file) .eq. 0) then
+        call resolve_offline_motion_file(line)
+    endif
     unit_id = 901
     count = 0
 

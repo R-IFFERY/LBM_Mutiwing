@@ -8,6 +8,8 @@ subroutine init_motion_runtime()
 
     motion_source_kind = motion_source_file
     motion_source_name = 'file'
+    motion_file = ''
+    flow_save_k = 0.0d0
     zmq_endpoint = 'tcp://*:5555'
     zmq_flow_output_interval = 0
     motion_stream_ready = .false.

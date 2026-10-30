@@ -33,7 +33,7 @@ module com_date
 	        real (kind=ps) wing_initial_x_origin,wing_initial_x_spacing,wing_initial_y_origin
 	        parameter (wing_initial_x_origin=0.0d0)
 	        parameter (wing_initial_x_spacing=1.5d0)
-	        parameter (wing_initial_y_origin=0.5d0)
+	        parameter (wing_initial_y_origin=0.0d0)
 		integer output_stride_x,output_stride_y !流场输出抽样步长，仅影响输出文件密度，不影响仿真网格
 		parameter (output_stride_x=2,output_stride_y=2)
 	integer cycles !开始记录力与运动的时间步
@@ -53,10 +53,11 @@ module com_date
 	    character(len=256) motion_source_name
 	    character(len=256) zmq_endpoint
 	    character(len=256) output_root
-	    character(len=256) output_dir
-	    character(len=256) episode_flow_output_dir
-	    character(len=256) restart_input_dir
-		    integer motion_points
+		    character(len=256) output_dir
+		    character(len=256) episode_flow_output_dir
+		    character(len=256) restart_input_dir
+		    real (kind=ps) flow_save_k
+			    integer motion_points
 		    integer motion_step_count
 		    integer motion_index
 		    integer motion_column_count,motion_stream_value_count
@@ -180,6 +181,7 @@ end module
 
 Program LBM
 	use MPI
+	use openacc
 	use cublas
     use cusolverDn
 	use com_date
@@ -190,16 +192,32 @@ Program LBM
 	
 
 	type(mesh_dat) mesh(max_meshid)
-	integer i,j,k,ip,jp,n,nmax,nforce,flag1,flag2,stat
-    real (kind=ps) cpu_ts,cpu_ts1,cpu_es1,cpu_es2,cpu_es3,ansstime
-	real (kind=ps) streaming_time,ph_time,colission_time,bc_time,bc1_time,bc2_time,bc3_time,move_mesh_time,move_airfoil_time,outer_bc_time,vor_time
-    character(len=512) :: out_path
-	type(cusolverDnHandle) :: h
+		integer i,j,k,ip,jp,n,nmax,nforce,flag1,flag2,stat
+		integer gpu_count,gpu_id
+		integer icyc,iph,nsave
+	    real (kind=ps) cpu_ts,cpu_ts1,cpu_es1,cpu_es2,cpu_es3,ansstime
+		real (kind=ps) streaming_time,ph_time,colission_time,bc_time,bc1_time,bc2_time,bc3_time,move_mesh_time,move_airfoil_time,outer_bc_time,vor_time
+	    real (kind=ps) pi_save,step_per_time,k_save,period_step
+	    character(len=512) :: out_path
+		type(cusolverDnHandle) :: h
 
-	stat=cusolverDnCreate(h)
 	call MPI_INIT(ierr)
 	call MPI_COMM_RANK(MPI_COMM_WORLD,myid,ierr)
 	call MPI_COMM_SIZE(MPI_COMM_WORLD,numprocs,ierr)
+
+	gpu_count=acc_get_num_devices(acc_device_nvidia)
+	if (gpu_count.le.0) then
+		if (myid.eq.0) write(*,*) 'No NVIDIA GPU is available to OpenACC'
+		call MPI_ABORT(MPI_COMM_WORLD,900,ierr)
+	endif
+	gpu_id=mod(myid,gpu_count)
+	call acc_set_device_num(gpu_id,acc_device_nvidia)
+	call acc_init(acc_device_nvidia)
+	stat=cusolverDnCreate(h)
+	if (stat.ne.0) then
+		write(*,*) 'Rank',myid,'cusolverDnCreate failed: status=',stat
+		call MPI_ABORT(MPI_COMM_WORLD,903,ierr)
+	endif
 
 	if(myid.gt.0) then
 		leftpro=myid-1
@@ -214,12 +232,6 @@ Program LBM
 	print*,"Process",myid,"of",numprocs,"is alive"
 	
     goon=.false.
-    if(myid.eq.0) call init_output_dir()
-    call MPI_BCAST(output_root,len(output_root),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
-    call MPI_BCAST(output_dir,len(output_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
-    call MPI_BCAST(restart_input_dir,len(restart_input_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
-    if(myid.eq.0) print*,"Output directory:",trim(output_dir)
-	call MPI_BARRIER(MPI_COMM_WORLD,ierr)
     
 	    motion_loaded=.false.
 	    motion_points=0
@@ -275,20 +287,30 @@ Program LBM
 !	call space_distribution 	
 		!$acc enter data copyin (mesh(1))
 	call init_motion_runtime()
+    if(myid.eq.0) call init_output_dir()
+    call MPI_BCAST(output_root,len(output_root),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    call MPI_BCAST(output_dir,len(output_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    call MPI_BCAST(restart_input_dir,len(restart_input_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    call MPI_BCAST(motion_file,len(motion_file),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    call MPI_BCAST(flow_save_k,1,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
+    if(myid.eq.0.and.motion_source_kind.eq.motion_source_file) print*,"Input motion file:",trim(motion_file)
+    if(myid.eq.0.and.motion_source_kind.eq.motion_source_file) print*,"Flow save k:",flow_save_k
+    if(myid.eq.0) print*,"Output directory:",trim(output_dir)
+	call MPI_BARRIER(MPI_COMM_WORLD,ierr)
 	layer1(1)=1
 	if (motion_source_kind.eq.motion_source_file) then
 	    call load_motion_table()
 	    call build_motion_step_table(mesh(1)%scale*UU)
 			nmax=10 !最大时间迭代步数
 		cycles=0
-		if(goon==.false.)then
-			nforce=101
-	        call build_output_path('force.dat', out_path)
-			if(myid.eq.0) open(nforce,file=trim(out_path),status='unknown')
-			nforce=102
-	        call build_output_path('airfoil_motion.dat', out_path)
-			if(myid.eq.0) open(nforce,file=trim(out_path),status='unknown')
-			nforce=101	
+			if(goon==.false.)then
+				nforce=101
+		        call build_output_path('force.dat', out_path)
+				if(myid.eq.0) open(nforce,file=trim(out_path),status='replace')
+				nforce=102
+		        call build_output_path('airfoil_motion.dat', out_path)
+				if(myid.eq.0) open(nforce,file=trim(out_path),status='replace')
+				nforce=101	
 			else
 	            if(myid.eq.0) then
 	                call build_restart_input_path('force.dat', out_path)
@@ -301,15 +323,15 @@ Program LBM
 						cycles=cycles+1
 		            ENDDO
 	                close(103)
-				endif
-				nforce=101
-		        call build_output_path('force.dat', out_path)
-				if(myid.eq.0) open(nforce,file=trim(out_path),status='unknown')
-			    nforce=102
-		        call build_output_path('airfoil_motion.dat', out_path)
-				if(myid.eq.0) open(nforce,file=trim(out_path),status='unknown')
-			    nforce=101
-			endif	
+					endif
+					nforce=101
+			        call build_output_path('force.dat', out_path)
+					if(myid.eq.0) open(nforce,file=trim(out_path),status='old',position='append')
+				    nforce=102
+			        call build_output_path('airfoil_motion.dat', out_path)
+					if(myid.eq.0) open(nforce,file=trim(out_path),status='old',position='append')
+				    nforce=101
+				endif	
 
 	    n=1
 		call init(mesh)
@@ -370,9 +392,19 @@ Program LBM
 		move_mesh_time=0.0d0
 		outer_bc_time=0.0d0
 		vor_time=0.0d0
-		call cpu_time(cpu_ts)
-		do !n =1,1000
-			time=dble(n-1)*(mesh(1)%scale*UU)
+		pi_save=3.141592653589793d0
+		step_per_time=10000.0d0
+
+		k_save=flow_save_k
+		if(k_save.le.0.0d0) then
+			if(myid.eq.0) write(*,*) '流场保存用的 k 值无效: ', k_save
+			call MPI_FINALIZE(rc)
+			stop 1
+		endif
+		period_step=pi_save/k_save*step_per_time
+			call cpu_time(cpu_ts)
+			do !n =1,1000
+				time=dble(n-1)*(mesh(1)%scale*UU)
 			if(time.gt.motion_end_time+1.0d-12) exit
 			call MPI_BARRIER(MPI_COMM_WORLD,ierr)
 			call cpu_time(cpu_ts1)
@@ -418,14 +450,16 @@ Program LBM
 				if (mod(n,100).eq.0) print*,"已迭代",n,"步，误差为：",err
 	        endif
 
-			if ((mod(n,2500).eq.0).and.(((n.gt.160000).and.(n.le.180001)).or.((n.gt.20000).and.(n.le.40001)))) flag1=1
-	!		if ((mod(n,2000).eq.0).and.(((n.gt.109956).and.(n.le.125664)).or.((n.gt.235619).and.(n.le.251327)))) flag1=1	!k=2.0, 8T,16T
-	!		if ((mod(n,2500).eq.0).and.(((n.gt.92400).and.(n.le.110880)).or.((n.gt.240239).and.(n.le.258719)))) flag1=1		!k=1.7, 6T,14T
-	!		if ((mod(n,3000).eq.0).and.(((n.gt.112200).and.(n.le.134640)).or.((n.gt.291719).and.(n.le.314159)))) flag1=1	!k=1.4, 6T,14T
-	!		if ((mod(n,4000).eq.0).and.(((n.gt.85679).and.(n.le.114239)).or.((n.gt.314159).and.(n.le.342719)))) flag1=1		!k=1.1, 4T,12T
-!			if ((mod(n,5000).eq.0).and.(((n.gt.117809).and.(n.le.157079)).or.((n.gt.353429).and.(n.le.392699)))) flag1=1	!k=0.8, 4T,10T
-	!		if ((mod(n,8000).eq.0).and.(((n.gt.125664).and.(n.le.188496)).or.((n.gt.565487).and.(n.le.628319)))) flag1=1	!k=0.5, 3T,10T
-	!		if ((mod(n,20000).eq.0).and.(((n.gt.157080).and.(n.le.314159)).or.((n.gt.1099557).and.(n.le.1256637)))) flag1=1	!k=0.2, 2T,8T
+				flag1=0
+				do icyc=21,30
+					do iph=0,31
+						nsave=nint((dble(icyc-1)+dble(iph)/32.0d0)*period_step)
+						if(iph.eq.0) nsave=nsave+2
+						if(n.eq.nsave) flag1=1
+					enddo
+				enddo
+
+
 	        if((flag1.eq.1).and.(flag2.eq.0))then
 			!if(n.eq.1000)then
 				!$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%pre,mesh(1)%body,mesh(1)%dvordt,xb1,yb1)
@@ -433,10 +467,10 @@ Program LBM
 	            flag1=0
 	        endif
 		!if ((n.eq.916400).or.(n.eq.924400).or.(n.eq.917200).or.(n.eq.926400).or.(n.eq.916800).or.(n.eq.925200)) call output(n,mesh)
-			if(mod(n,100000).eq.0) then ! 从这里续算
-				!$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%f,mesh(1)%leftf2,mesh(1)%rightf2,mesh(1)%upf2,mesh(1)%downf2,mesh(1)%f0(1:mesh(1)%Nx,1,1:Q),mesh(1)%f0(1:mesh(1)%Nx,mesh(1)%Ny,1:Q),mesh(1)%f0(1,2:mesh(1)%Ny-1,1:Q),mesh(1)%f0(mesh(1)%Nx,2:mesh(1)%Ny-1,1:Q))
-				call saveflowfield(n,mesh)
-			endif
+				if(n.eq.motion_step_count) then ! Save restart at the final offline motion step.
+					!$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%f,mesh(1)%leftf2,mesh(1)%rightf2,mesh(1)%upf2,mesh(1)%downf2,mesh(1)%f0(1:mesh(1)%Nx,1,1:Q),mesh(1)%f0(1:mesh(1)%Nx,mesh(1)%Ny,1:Q),mesh(1)%f0(1,2:mesh(1)%Ny-1,1:Q),mesh(1)%f0(mesh(1)%Nx,2:mesh(1)%Ny-1,1:Q))
+					call saveflowfield(n,mesh)
+				endif
 			n=n+1
 		enddo
 		!!$acc end data

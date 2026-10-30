@@ -1627,15 +1627,44 @@ subroutine immersed_boundary_Wu(mesh,h)
         comj(i,2)=vb(i)-bv(i)
     enddo
     !$acc end kernels loop
+	if (time.lt.0.5d0*mesh%scale*UU) then
+		!$acc update self(as,comj(1:b_segment_count,1:2))
+		write(*,*) 'IBM DEBUG A(min,max)=', minval(as), maxval(as)
+		write(*,*) 'IBM DEBUG rhs-x(min,max)=', minval(comj(1:b_segment_count,1)), maxval(comj(1:b_segment_count,1))
+		write(*,*) 'IBM DEBUG rhs-y(min,max)=', minval(comj(1:b_segment_count,2)), maxval(comj(1:b_segment_count,2))
+	endif
     call cpu_time(time_s6)
     !$acc host_data use_device (as)
     stat=cusolverDnDgetrf_bufferSize(h, b_segment_count, b_segment_count, as, b_segment_count,lwork)
     !$acc end host_data
+	if ((stat.ne.0).or.(lwork.le.0)) then
+		write(*,*) 'cusolverDnDgetrf_bufferSize failed: status=',stat,' lwork=',lwork
+		call MPI_ABORT(MPI_COMM_WORLD,904,ierr)
+	endif
     allocate (Workspace(lwork))
     !$acc enter data create (Workspace)
-    !$acc host_data use_device (as,Workspace,devIpiv,devInfo,comj,xx2,glx,gly)
+    !$acc host_data use_device (as,Workspace,devIpiv,devInfo)
     stat=cusolverDnDgetrf(h,b_segment_count,b_segment_count,as,b_segment_count,Workspace,devIpiv,devInfo)
+	!$acc end host_data
+	!$acc update self(devInfo)
+	if ((stat.ne.0).or.(devInfo.ne.0)) then
+		write(*,*) 'cusolverDnDgetrf failed: status=',stat,' devInfo=',devInfo
+		call MPI_ABORT(MPI_COMM_WORLD,901,ierr)
+	endif
+	!$acc host_data use_device (as,devIpiv,comj,devInfo)
     stat=cusolverDnDgetrs(h,CUBLAS_OP_N,b_segment_count,2,as,b_segment_count,devIpiv,comj,max_boundary_points,devInfo)
+	!$acc end host_data
+	!$acc update self(devInfo)
+	if ((stat.ne.0).or.(devInfo.ne.0)) then
+		write(*,*) 'cusolverDnDgetrs failed: status=',stat,' devInfo=',devInfo
+		call MPI_ABORT(MPI_COMM_WORLD,902,ierr)
+	endif
+	if (time.lt.0.5d0*mesh%scale*UU) then
+		!$acc update self(comj(1:b_segment_count,1:2))
+		write(*,*) 'IBM DEBUG solution-x(min,max)=', minval(comj(1:b_segment_count,1)), maxval(comj(1:b_segment_count,1))
+		write(*,*) 'IBM DEBUG solution-y(min,max)=', minval(comj(1:b_segment_count,2)), maxval(comj(1:b_segment_count,2))
+	endif
+	!$acc host_data use_device (xx2,comj,glx,gly)
     call cublasDgemv('N',adjoint_n,b_segment_count,1.0d0,xx2,adjoint_n,comj(:,1),1,0.0d0,glx,1)
     call cublasDgemv('N',adjoint_n,b_segment_count,1.0d0,xx2,adjoint_n,comj(:,2),1,0.0d0,gly,1)
     !$acc end host_data
