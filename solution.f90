@@ -62,16 +62,19 @@ Subroutine init(mesh)
         if(myid.eq.0)mesh(n)%upf2=mesh(n)%f(:,mesh(n)%Ny,:)
         if(myid.eq.0)mesh(n)%downf2=mesh(n)%f(:,1,:)
 
-		call body_point(mesh(n),mesh(n)%Nx,mesh(n)%Ny)
+        mesh(n)%body=0
+        mesh(n)%f_old=mesh(n)%f
+        !$acc update device(mesh(n)%rho,mesh(n)%u,mesh(n)%v,mesh(n)%u0,mesh(n)%v0,mesh(n)%pre,mesh(n)%f,mesh(n)%f0,mesh(n)%f_old,mesh(n)%body)
 	enddo
 	    if (.not. allocated(gforce)) then
 	        allocate(gforce(mesh(max_meshid)%Nx,mesh(max_meshid)%Ny,2))
 	    endif
 		gforce=0.0d0
+        adjoint_n=0
 	    mesh(max_meshid)%body=0
 		!$acc update device (mesh)
 		!$acc update device (gforce)
-	    call move_boundary(mesh(max_meshid))
+	    ! Boundary coordinates are loaded after init; update on the first solver tick.
 end Subroutine
 
 Subroutine erranalysis(mesh,bnh)
@@ -129,117 +132,14 @@ Subroutine erranalysis(mesh,bnh)
 !	print*, err
 end Subroutine
 
-Subroutine output(cycle1,mesh)
-	use com_date
-    use meshtype
-	implicit none
-	
-	type(mesh_dat) mesh(max_meshid)
-	integer cycle1,i,j,k,kk,outfile,outfile1,n
-	real (kind=ps) duy,dvx,yo
-	integer i1,i2,i3,i4,nn,totalnodecounts,totalfacecounts
-	integer is,ie,js,je,iis,iie,jjs,jje,out_nx,out_ny
-    character(len=512) :: out_path
+subroutine output(cycle1,mesh)
+    use nested_io
+    implicit none
+    integer :: cycle1
+    type(mesh_dat) :: mesh(max_meshid)
+    call output_nested_flow(cycle1,mesh)
+end subroutine
 
-	parameter(outfile=1234)
-
-	character(len=32) :: nm
-	do n=1,max_meshid
-		if (numprocs.ne.1) then
-			if (myid.eq.0) then
-				call gather (mesh(n)%u,1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%v,1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%pre,1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-			else
-				call gather (mesh(n)%u,mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%v,mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%pre,mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-			endif
-		endif			
-	enddo
-
-	totalnodecounts=0.0d0
-	totalfacecounts=0.0d0
-	if(myid.eq.0) then
-		do i=1,max_meshid
-			totalnodecounts=totalnodecounts+mesh(i)%nodescounts
-			totalfacecounts=totalfacecounts+mesh(i)%facecounts
-		enddo
-			write(nm,'(i0)') cycle1
-	        call build_flow_output_path("F"//trim(nm)//".dat", out_path)
-		open(outfile,file=trim(out_path),status="unknown")
-		write(outfile,'(a)') 'VARIABLES = "X" "Y" "U" "V" "Presure" "Vorticity" "body" "dvordt" '
-		out_nx=(mesh(1)%Nx-1)/output_stride_x+1
-		out_ny=(mesh(1)%Ny-1)/output_stride_y+1
-		write(outfile,*) 'ZONE T="Flow feild", I=',out_nx,',J=',out_ny,',SOLUTIONTIME=',cycle1*UU*mesh_max_scale
-		do k=1,max_meshid
-			is=1
-			ie=mesh(k)%Nx
-			js=1
-			je=mesh(k)%Ny
-			do j=js,je,output_stride_y
-				do i=is,ie,output_stride_x
-!					if(i.eq.(mesh(k)%Nx-1)) then
-!						dvx=(1.5*mesh(k)%v(i,j)-2.0*mesh(k)%v(i-1,j)+0.5*mesh(k)%v(i-2,j))/(UU*mesh(k)%scale)
-!					else if (i.eq.2) then
-!						dvx=(-1.5*mesh(k)%v(i,j)+2.0*mesh(k)%v(i+1,j)-0.5*mesh(k)%v(i+2,j))/(UU*mesh(k)%scale)
-!					else
-!						dvx=(mesh(k)%v(i+1,j)-mesh(k)%v(i-1,j))/(UU*2.0*mesh(k)%scale)	
-!					endif
-!					if(j.eq.mesh(k)%Ny-1) then
-!						duy=(1.5*mesh(k)%u(i,j)-2.0*mesh(k)%u(i,j-1)+0.5*mesh(k)%u(i,j-2))/(UU*mesh(k)%scale)
-!					else if (j.eq.2) then
-!						duy=(-1.5*mesh(k)%u(i,j)+2.0*mesh(k)%u(i,j+1)-0.5*mesh(k)%u(i,j+2))/(UU*mesh(k)%scale)
-!					else
-!						duy=(mesh(k)%u(i,j+1)-mesh(k)%u(i,j-1))/(UU*2.0*mesh(k)%scale)	
- !                   endif
-                    if(i.eq.ie) then
-						dvx=(1.5*mesh(k)%v(i,j)-2.0*mesh(k)%v(i-1,j)+0.5*mesh(k)%v(i-2,j))/(UU*mesh(k)%scale)
-					else if (i.eq.1) then
-						dvx=(-1.5*mesh(k)%v(i,j)+2.0*mesh(k)%v(i+1,j)-0.5*mesh(k)%v(i+2,j))/(UU*mesh(k)%scale)
-					else
-						dvx=(mesh(k)%v(i+1,j)-mesh(k)%v(i-1,j))/(UU*2.0*mesh(k)%scale)	
-					endif
-                    
-					if(j.eq.je) then
-						duy=(1.5*mesh(k)%u(i,j)-2.0*mesh(k)%u(i,j-1)+0.5*mesh(k)%u(i,j-2))/(UU*mesh(k)%scale)
-					else if (j.eq.1) then
-						duy=(-1.5*mesh(k)%u(i,j)+2.0*mesh(k)%u(i,j+1)-0.5*mesh(k)%u(i,j+2))/(UU*mesh(k)%scale)
-					else
-						duy=(mesh(k)%u(i,j+1)-mesh(k)%u(i,j-1))/(UU*2.0*mesh(k)%scale)	
-					endif
-					nn=0
-!					if(mesh(k)%body(i,j).eq.3.or.mesh(k)%body(i,j).eq.4) then
-					    write(outfile,2000) mesh(k)%ox+dble(i-1)*mesh(k)%scale+dble(movenum)*mesh_max_scale,mesh(k)%oy+dble(j-1)*mesh(k)%scale,mesh(k)%u(i,j)/UU,mesh(k)%v(i,j)/UU,mesh(k)%pre(i,j),(dvx-duy),dble(mesh(k)%body(i,j)),mesh(k)%dvordt(i,j)
-!					else
-!						write(outfile,2000) mesh(k)%ox+dble(i-1)*mesh(k)%scale,mesh(k)%oy+dble(j-1)*mesh(k)%scale,0.0d0,0.0d0,1.0/3.0d0,0.0,dble(mesh(k)%body(i,j))
- !               	endif
-				enddo
-			enddo
-		enddo
-2000	format(25e16.8)
-2001	format(4i8.6)
-		write(outfile,*) 'ZONE T="airfoil", NODES=',b_point+wing_count,' ELEMENTS,=',b_segment_count,', DATAPACKING=POINT, ZONETYPE=FETRIANGLE',',SOLUTIONTIME=',cycle1*UU*mesh_max_scale
-		do i=1,b_point
-			write(outfile,'(8f14.8)') xb1(I)+dble(movenum)*mesh_max_scale,yb1(I),255d0,0.0d0,0.0d0,0.0d0,0.0d0,0.0d0
-		enddo
-		do i=1,wing_count
-			j=wing_point_start(i)
-			k=j+(boundary_points_per_wing-1)/2
-			write(outfile,'(8f14.8)') 0.5d0*((xb1(j)+dble(movenum)*mesh_max_scale)+(xb1(k)+dble(movenum)*mesh_max_scale)), &
-			    0.5d0*(yb1(j)+yb1(k)),255d0,0.0d0,0.0d0,0.0d0,0.0d0,0.0d0
-		enddo
-		do i=1,wing_count
-			j=wing_point_start(i)
-			do k=j,j+boundary_points_per_wing-2
-				write(outfile,'(3I5.3)') k,k+1,b_point+i
-			enddo
-		enddo
-		close(outfile)
-    endif
-	return
-end Subroutine
-    
 Subroutine    output_gforce(mm,mesh)
 	use com_date
     use meshtype
@@ -275,6 +175,7 @@ Subroutine evolution(mesh,cycle1,nforce,h)
     use cusolverDn
 	use com_date
     use meshtype
+    use nested_grid
 !    USE DFPORT, ONLY: DTIME
 	implicit none
 	
@@ -288,6 +189,9 @@ Subroutine evolution(mesh,cycle1,nforce,h)
 	real (kind=ps) force_row(4+12*max_wings_supported),motion_row(1+3*max_wings_supported)
 	type(cusolverDnHandle) :: h
 
+    l1=2
+    l2=mesh(max_meshid)%Ny-1
+    call prepare_nested_tick(mesh,cycle1)
 	do n=1,size(layer1)
         time=dble(cycle1-1)*(mesh(layer1(1))%scale*UU)
         if(time.ge.0.0d0) then
@@ -315,21 +219,25 @@ Subroutine evolution(mesh,cycle1,nforce,h)
         endif
 
 		call cpu_time(time_s1)
-        call streaming(mesh(1),sp,ep,l1,l2)
+        call streaming(mesh(max_meshid),sp,ep,l1,l2)
 		call cpu_time(time_e1)
 		call cpu_time(time_s2)
-		call physical_variables(mesh(1),l1,l2)
+		call fill_nested_boundary(mesh(max_meshid-1),mesh(max_meshid), &
+            dble(mod(cycle1-1,2))/2d0+0.5d0)
+		call physical_variables(mesh(max_meshid),l1,l2)
 		call cpu_time(time_e2)
-        !call immersed_boundary_suzuki_and_inamuro(mesh(1))
+        !call immersed_boundary_suzuki_and_inamuro(mesh(max_meshid))
 		call cpu_time(time_s3)
-		call immersed_boundary_wu(mesh(1),h)
+        call collect_ibm_velocity(mesh(max_meshid))
+		call immersed_boundary_wu(mesh(max_meshid),h)
+        call distribute_ibm_velocity(mesh(max_meshid))
 		call cpu_time(time_e3)
 		call cpu_time(time_s4)
-		call colission(mesh(1),sp,ep,l1,l2)
+		call colission(mesh(max_meshid),sp,ep,l1,l2)
 		call cpu_time(time_e4)
 	        do wing=1,wing_count
-	            wing_force(wing,:)=2.0d0*wing_force(wing,:)/(UU*UU*(1.0d0/mesh(1)%scale))
-	            wing_moment(wing)=-2.0d0*wing_moment(wing)/(UU*UU*(1.0d0/(mesh(1)%scale*mesh(1)%scale)))
+	            wing_force(wing,:)=2.0d0*wing_force(wing,:)/(UU*UU*(1.0d0/mesh(max_meshid)%scale))
+	            wing_moment(wing)=-2.0d0*wing_moment(wing)/(UU*UU*(1.0d0/(mesh(max_meshid)%scale*mesh(max_meshid)%scale)))
 	        enddo
 	        force=0.0d0
 	        do wing=1,wing_count
@@ -417,7 +325,7 @@ Subroutine evolution(mesh,cycle1,nforce,h)
 	        endif        
 	    enddo  
 	call cpu_time(time_s9) 
-	call boundary_condition1(mesh,layer1,size(layer1))
+	call finish_nested_tick(mesh,cycle1)
 	call cpu_time(time_e9)
 end Subroutine
 
@@ -475,7 +383,9 @@ Subroutine streaming(mesh,sp,ep,l1,l2)
         endif
         
 		call MPI_BARRIER(MPI_COMM_WORLD,ierr)
+		!$acc update self(mesh%f0)
 		call transferdata(mesh%f0,i,j,mesh%start_row,mesh%end_row,mesh%Nx,mesh%Ny,mesh%meshid,l1,l2)
+        !$acc update device(mesh%f0)
 		call MPI_BARRIER(MPI_COMM_WORLD,ierr)
     endif
 end Subroutine
@@ -574,7 +484,9 @@ Subroutine physical_variables(mesh,l1,l2)
 !				call gather (mesh%rho,mesh%start_row,mesh%end_row,mesh%Nx,mesh%Ny,mesh%start_row,mesh%end_row)
 !			endif
         call MPI_BARRIER(MPI_COMM_WORLD,ierr)
+        !$acc update self(mesh%f,mesh%rho,mesh%u,mesh%v,mesh%pre)
         call transferdatapv(mesh%f,mesh%rho,mesh%u,mesh%v,mesh%pre,i,j,mesh%start_row,mesh%end_row,mesh%Nx,mesh%Ny,mesh%meshid,l1,l2)
+        !$acc update device(mesh%f,mesh%rho,mesh%u,mesh%v,mesh%pre)
         call MPI_BARRIER(MPI_COMM_WORLD,ierr)
     endif
 !     if(myid.eq.0.and.mesh%meshid.eq.13) print*,mesh%rho(59,99)
@@ -623,7 +535,8 @@ Subroutine colission(mesh,sp,ep,l1,l2)
             temp(8)=(rt*ut*rt*ut-rt*vt*rt*vt)
             temp(9)=(rt*ut*rt*vt)
 
-            if (mesh%layer.eq.1) then
+            fp=0.0d0
+            if (mesh%layer.eq.max_meshid) then
 				gfx=gforce(i,j,1)
 				gfy=gforce(i,j,2)
                 fp(1)=0.0d0
@@ -663,7 +576,9 @@ Subroutine colission(mesh,sp,ep,l1,l2)
 			j=mesh%end_row
 		endif
 		call MPI_BARRIER(MPI_COMM_WORLD,ierr)
-		call transferdata(mesh%f,i,j,mesh%start_row,mesh%end_row,mesh%Nx,mesh%Ny,mesh%meshid,l1,l2)
+		!$acc update self(mesh%f)
+        call transferdata(mesh%f,i,j,mesh%start_row,mesh%end_row,mesh%Nx,mesh%Ny,mesh%meshid,l1,l2)
+        !$acc update device(mesh%f)
 		call MPI_BARRIER(MPI_COMM_WORLD,ierr)
 	endif
 end Subroutine
@@ -1614,241 +1529,20 @@ subroutine integration_real_a (dt,xref)
 end
     
 subroutine saveflowfield(cycle1,mesh)
-	use com_date
-    use meshtype
-	implicit none
-	
-	type(mesh_dat) mesh(max_meshid)
-    integer cycle1,n,outfile,outfile1,i,j,k
-    character(len=512) :: file_path
-    
-    parameter(outfile=2233)
-	parameter(outfile1=2234)
-    
-	do n=1,max_meshid
-		if (numprocs.ne.1) then
-			if (myid.eq.0) then
-				call gather (mesh(n)%u,1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%v,1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%f(:,:,1),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,2),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,3),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,4),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,5),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,6),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,7),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,8),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,9),1,mesh(n)%Nx,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-			else
-				call gather (mesh(n)%u,mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%v,mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-				call gather (mesh(n)%f(:,:,1),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,2),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,3),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,4),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,5),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,6),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,7),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,8),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-                call gather (mesh(n)%f(:,:,9),mesh(n)%start_row,mesh(n)%end_row,mesh(n)%Nx,mesh(n)%Ny,mesh(n)%start_row,mesh(n)%end_row)
-			endif
-		endif			
-    enddo
-    
-    if(myid.eq.0) then
-        call build_output_path('saved_flow_feild.dat', file_path)
-		open(outfile,file=trim(file_path),form='binary',status="unknown")
-        write(outfile) cycle1
-        write(outfile) wing_count
-        write(outfile) body_rel_a(1:wing_count),body_rel_a_prev(1:wing_count),body_rel_v(1:wing_count),body_rel_v_prev(1:wing_count), &
-            body_rel_s(1:wing_count),body_rel_s_prev(1:wing_count),body_rel_pos(1:wing_count),body_rel_theta_prev(1:wing_count), &
-            body_rel_theta(1:wing_count),body_rel_temp_theta_prev(1:wing_count),body_rel_temp_theta(1:wing_count)
-        write(outfile) movenum
-		do k=1,max_meshid
-			do j=1,mesh(k)%Ny
-				do i=1,mesh(k)%Nx
-                    write(outfile) mesh(k)%u(i,j),mesh(k)%v(i,j),mesh(k)%f(i,j,:)
-				enddo
-            enddo
-            do j=2,mesh(k)%Ny-1
-                write(outfile) mesh(k)%leftf2(j,:)
-                write(outfile) mesh(k)%f0(1,j,:)
-                write(outfile) mesh(k)%rightf2(j,:)
-                write(outfile) mesh(k)%f0(mesh(k)%Nx,j,:)                
-            enddo
-            do j=1,mesh(k)%Nx
-                write(outfile) mesh(k)%upf2(j,:)
-                write(outfile) mesh(k)%f0(j,mesh(k)%Ny,:)
-                write(outfile) mesh(k)%downf2(j,:)
-                write(outfile) mesh(k)%f0(j,1,:)                
-            enddo
-        enddo
-        close(outfile)
-    endif
-    
-    if(myid.eq.0) then
-        call build_output_path('saved_flow_feild_copy.dat', file_path)
-		open(outfile1,file=trim(file_path),form='binary',status="unknown")
-        write(outfile1) cycle1
-        write(outfile1) wing_count
-        write(outfile1) body_rel_a(1:wing_count),body_rel_a_prev(1:wing_count),body_rel_v(1:wing_count),body_rel_v_prev(1:wing_count), &
-            body_rel_s(1:wing_count),body_rel_s_prev(1:wing_count),body_rel_pos(1:wing_count),body_rel_theta_prev(1:wing_count), &
-            body_rel_theta(1:wing_count),body_rel_temp_theta_prev(1:wing_count),body_rel_temp_theta(1:wing_count)
-        write(outfile1) movenum
-		do k=1,max_meshid
-			do j=1,mesh(k)%Ny
-				do i=1,mesh(k)%Nx
-                    write(outfile1) mesh(k)%u(i,j),mesh(k)%v(i,j),mesh(k)%f(i,j,:)
-                enddo
-			enddo
-            do j=2,mesh(k)%Ny-1
-                write(outfile1) mesh(k)%leftf2(j,:)
-                write(outfile1) mesh(k)%f0(1,j,:)
-                write(outfile1) mesh(k)%rightf2(j,:)
-                write(outfile1) mesh(k)%f0(mesh(k)%Nx,j,:)                
-            enddo
-            do j=1,mesh(k)%Nx
-                write(outfile1) mesh(k)%upf2(j,:)
-                write(outfile1) mesh(k)%f0(j,mesh(k)%Ny,:)
-                write(outfile1) mesh(k)%downf2(j,:)
-                write(outfile1) mesh(k)%f0(j,1,:)                
-            enddo
-        enddo
-        close(outfile1)
-	endif
-end
-    
-subroutine readflowfield(cycle1,mesh)
-    use mpi	
-    use com_date
-    use meshtype
-	implicit none
-	
-	type(mesh_dat) mesh(max_meshid)
-    integer cycle1,n,outfile,outfile1,i,j,k,sp,ep,Ynum,ios,file_wing_count
-    logical tt
-    character(len=512) :: file_path
-    
-    parameter(outfile=2233)
-	parameter(outfile1=2234)
-    
-    if(myid.eq.0) then
-        tt=.false.
-        body_rel_a=0.0d0
-        body_rel_a_prev=0.0d0
-        body_rel_v=0.0d0
-        body_rel_v_prev=0.0d0
-        body_rel_s=0.0d0
-        body_rel_s_prev=0.0d0
-        body_rel_pos=0.0d0
-        body_rel_theta=0.0d0
-        body_rel_theta_prev=0.0d0
-        body_rel_temp_theta=0.0d0
-        body_rel_temp_theta_prev=0.0d0
-        call build_restart_input_path('saved_flow_feild.dat', file_path)
-		open(outfile,file=trim(file_path),form='binary',status="old",iostat=ios)
-        if (ios.ne.0) goto 798
-        read(outfile,err=798,end=798) cycle1
-        read(outfile,err=798,end=798) file_wing_count
-        if (file_wing_count.ne.wing_count) stop '续算文件中的翼数量与当前编译设置不一致'
-        read(outfile,err=798,end=798) body_rel_a(1:wing_count),body_rel_a_prev(1:wing_count),body_rel_v(1:wing_count),body_rel_v_prev(1:wing_count), &
-            body_rel_s(1:wing_count),body_rel_s_prev(1:wing_count),body_rel_pos(1:wing_count),body_rel_theta_prev(1:wing_count), &
-            body_rel_theta(1:wing_count),body_rel_temp_theta_prev(1:wing_count),body_rel_temp_theta(1:wing_count)
-        read(outfile,err=798,end=798) movenum
-		do k=1,max_meshid
-			do j=1,mesh(k)%Ny
-				do i=1,mesh(k)%Nx
-                    read(outfile,err=798,end=798) mesh(k)%u(i,j),mesh(k)%v(i,j),mesh(k)%f(i,j,:)
-				enddo
-            enddo
-            do j=2,mesh(k)%Ny-1
-                read(outfile) mesh(k)%leftf2(j,:)
-                read(outfile) mesh(k)%f0(1,j,:)
-                read(outfile) mesh(k)%rightf2(j,:)
-                read(outfile) mesh(k)%f0(mesh(k)%Nx,j,:)                
-            enddo
-            do j=1,mesh(k)%Nx
-                read(outfile) mesh(k)%upf2(j,:)
-                read(outfile) mesh(k)%f0(j,mesh(k)%Ny,:)
-                read(outfile) mesh(k)%downf2(j,:)
-                read(outfile) mesh(k)%f0(j,1,:)                
-            enddo
-        enddo
-        close(outfile)
-        tt=.true. !读取存档成功
-        print*, "sucess!"!"读取保存的流场数据成功！"
-798 continue 
-        if(tt.eq..false.) then
-	        print*,'启动备用存档！'
-            call build_restart_input_path('saved_flow_feild_copy.dat', file_path)
-		    open(outfile1,file=trim(file_path),form='binary',status="old",iostat=ios)
-            if (ios.ne.0) stop '无法打开续算存档文件'
-            read(outfile1) cycle1
-            read(outfile1) file_wing_count
-            if (file_wing_count.ne.wing_count) stop '续算文件中的翼数量与当前编译设置不一致'
-            read(outfile1) body_rel_a(1:wing_count),body_rel_a_prev(1:wing_count),body_rel_v(1:wing_count),body_rel_v_prev(1:wing_count), &
-                body_rel_s(1:wing_count),body_rel_s_prev(1:wing_count),body_rel_pos(1:wing_count),body_rel_theta_prev(1:wing_count), &
-                body_rel_theta(1:wing_count),body_rel_temp_theta_prev(1:wing_count),body_rel_temp_theta(1:wing_count)
-            read(outfile1) movenum
-		    do k=1,max_meshid
-			    do j=1,mesh(k)%Ny
-				    do i=1,mesh(k)%Nx
-                        read(outfile1) mesh(k)%u(i,j),mesh(k)%v(i,j),mesh(k)%f(i,j,:)
-				    enddo
-                enddo
-                do j=2,mesh(k)%Ny-1
-                    read(outfile1) mesh(k)%leftf2(j,:)
-                    read(outfile1) mesh(k)%f0(1,j,:)
-                    read(outfile1) mesh(k)%rightf2(j,:)
-                    read(outfile1) mesh(k)%f0(mesh(k)%Nx,j,:)                
-                enddo
-                do j=1,mesh(k)%Nx
-                    read(outfile1) mesh(k)%upf2(j,:)
-                    read(outfile1) mesh(k)%f0(j,mesh(k)%Ny,:)
-                    read(outfile1) mesh(k)%downf2(j,:)
-                    read(outfile1) mesh(k)%f0(j,1,:)                
-                enddo
-            enddo
-            close(outfile1)
-            print*,'读取保存的流场数据成功!'
-	    endif
-        call update_body_extra_from_rel()
-    endif
+    use nested_io
+    implicit none
+    integer :: cycle1
+    type(mesh_dat) :: mesh(max_meshid)
+    call save_nested_checkpoint(cycle1,mesh)
+end subroutine
 
-    if (numprocs.ne.1) then
-        if(myid.eq.0) print*, "将流场数据分配到各子进程..."
-        do k=1,max_meshid 
-            if(myid.eq.0)then
-                sp=1
-                ep=mesh(k)%Nx
-                Ynum=mesh(k)%Ny
-            else
-                sp=mesh(k)%start_row
-                ep=mesh(k)%end_row
-                Ynum=mesh(k)%Ny
-            endif
-            
-            call scattervariables2d(mesh(k)%u,sp,ep,Ynum)
-            call scattervariables2d(mesh(k)%v,sp,ep,Ynum)
-            call scattervariables3d(mesh(k)%f,sp,ep,Ynum)
-        enddo
-        if(myid.eq.0) print*,'数据分配完毕!'
-        call MPI_BCAST(cycle1,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_a,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_a_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_v,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_v_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_s,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_s_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_pos,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(movenum,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_theta_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_theta,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_temp_theta_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call MPI_BCAST(body_rel_temp_theta,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
-        call update_body_extra_from_rel()
-    endif
-end
+subroutine readflowfield(cycle1,mesh)
+    use nested_io
+    implicit none
+    integer :: cycle1
+    type(mesh_dat) :: mesh(max_meshid)
+    call read_nested_checkpoint(cycle1,mesh)
+end subroutine
 
 subroutine vor_mom_rate(cycle1,mesh)
 	use com_date

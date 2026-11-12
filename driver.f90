@@ -313,7 +313,6 @@ subroutine save_current_flow_output(mesh, n, flag2, ok, status_text)
 	
 	    current_cycle = max(1, n - 1)
 	    call ensure_episode_flow_output_dir(episode_index)
-	    !$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%pre,mesh(1)%body,mesh(1)%dvordt,xb1,yb1)
 	    call output(current_cycle, mesh)
 
     write(cycle_text, '(i0)') current_cycle
@@ -342,7 +341,7 @@ subroutine advance_zmq_segment(mesh, n, nforce, h, flag2, pending_flow_output, t
 
     ok = .false.
     error_text = ''
-    solver_dt = mesh(1)%scale * UU
+    solver_dt = mesh_min_scale * UU
     if (solver_dt.le.0.0d0) then
         error_text = '求解器时间步无效'
         return
@@ -382,25 +381,12 @@ subroutine run_zmq_time_step(mesh, n, nforce, h, flag2, pending_flow_output)
     logical, intent(inout) :: pending_flow_output
     type(cusolverDnHandle) :: h
 
-    time = dble(n - 1) * (mesh(1)%scale * UU)
+    time = dble(n - 1) * (mesh_min_scale * UU)
     call MPI_BARRIER(MPI_COMM_WORLD, ierr)
     if (n.ge.2) call erranalysis(mesh, n)
     call evolution(mesh, n, nforce, h)
 
-    if (body_rel_pos(1).ge.1.0d0) then
-        call move_mesh(1, mesh)
-        body_rel_pos(1) = body_rel_pos(1) - 1.0d0
-        call update_body_extra_from_rel()
-        movenum = movenum + 1
-        flag2 = 3
-    elseif (body_rel_pos(1).le.-1.0d0) then
-        call move_mesh(-1, mesh)
-        body_rel_pos(1) = body_rel_pos(1) + 1.0d0
-        call update_body_extra_from_rel()
-        movenum = movenum - 1
-        flag2 = 3
-    endif
-
+    ! Fixed nested boxes: prescribed translation moves the body, not the mesh.
     if (flag2.gt.0) flag2 = flag2 - 1
     if ((myid.eq.0).and.(mod(n,100).eq.0)) then
         print*, '在线模式已迭代', n, '步，误差为：', err

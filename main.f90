@@ -15,7 +15,7 @@ module com_date
 		integer max_wings_supported,wing_count,motion_columns_per_wing,max_motion_columns !翼数量相关参数
 		integer boundary_points_per_wing,boundary_segments_per_wing,max_boundary_points,max_boundary_segments
 		parameter (max_wings_supported=8)
-		parameter (wing_count=2)	!仿真翼数量
+		parameter (wing_count=1)	!仿真翼数量
 		parameter (motion_columns_per_wing=9)
 		parameter (max_motion_columns=1+motion_columns_per_wing*max_wings_supported)
 		parameter (boundary_points_per_wing=205)
@@ -27,9 +27,14 @@ module com_date
 	integer bc_num !选择物面边界条件的类型:1.非平衡外推(Guo-Zheng-Shi),2.插值反弹格式(Lallemand-Luo),3.插值反弹格式(Yu-Mei-shyy),4.浸润边界法(基于Wang et al.)
 	parameter (bc_num=4)
 	integer max_meshid
-	parameter (max_meshid=1)
+	parameter (max_meshid=4)
 			real (kind=ps) mesh_max_scale !最外层网格尺寸
-			parameter (mesh_max_scale=0.01d0)
+			parameter (mesh_max_scale=0.08d0)
+    real(kind=ps), parameter :: mesh_min_scale=mesh_max_scale/2**(max_meshid-1)
+    real(kind=ps), parameter :: grid_xmin(max_meshid)=(/-20d0,-16d0,-12d0,-8d0/)
+    real(kind=ps), parameter :: grid_xmax(max_meshid)=(/ 20d0, 16d0, 12d0, 8d0/)
+    real(kind=ps), parameter :: grid_ymin(max_meshid)=(/-10d0, -8d0, -6d0,-4d0/)
+    real(kind=ps), parameter :: grid_ymax(max_meshid)=(/ 10d0,  8d0,  6d0, 4d0/)
 	        real (kind=ps) wing_initial_x_origin,wing_initial_x_spacing,wing_initial_y_origin
 	        parameter (wing_initial_x_origin=0.0d0)
 	        parameter (wing_initial_x_spacing=1.5d0)
@@ -165,6 +170,8 @@ module meshtype
 	    integer meshid
 	    integer layer	!网格的层数，最外层为1
 	    integer Nx,Ny	!x向与y向网格的数目
+        ! Post-collision state at the start of the current level step.
+        real(kind=8), allocatable :: f_old(:,:,:)
 	    real (kind=8),allocatable :: rho(:,:),u(:,:),v(:,:),u0(:,:),v0(:,:),pre(:,:),f(:,:,:),f0(:,:,:)	! rho：密度，u：x方向速度，v：y方向速度，f：速度分布函数
         real (kind=8),allocatable :: vor(:,:),vor1(:,:),vor2(:,:),dvordt(:,:) 	! 涡量时间变化率
 	    real (kind=8) scale,c,dx,dy,Lx,Ly,dt,p0,tau_f,niu,err !本网格基本参数
@@ -194,10 +201,10 @@ Program LBM
 	type(mesh_dat) mesh(max_meshid)
 		integer i,j,k,ip,jp,n,nmax,nforce,flag1,flag2,stat
 		integer gpu_count,gpu_id
-		integer icyc,iph,nsave
+		integer save_second,nsave
 	    real (kind=ps) cpu_ts,cpu_ts1,cpu_es1,cpu_es2,cpu_es3,ansstime
 		real (kind=ps) streaming_time,ph_time,colission_time,bc_time,bc1_time,bc2_time,bc3_time,move_mesh_time,move_airfoil_time,outer_bc_time,vor_time
-	    real (kind=ps) pi_save,step_per_time,k_save,period_step
+	    real (kind=ps) solver_dt
 	    character(len=512) :: out_path
 		type(cusolverDnHandle) :: h
 
@@ -285,22 +292,20 @@ Program LBM
 	    call ini_mesh(max_meshid,mesh)
 	print*, "myid=",myid,"start from",mesh(1)%start_row,"to",mesh(1)%end_row
 !	call space_distribution 	
-		!$acc enter data copyin (mesh(1))
+		!$acc enter data copyin (mesh)
 	call init_motion_runtime()
     if(myid.eq.0) call init_output_dir()
     call MPI_BCAST(output_root,len(output_root),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
     call MPI_BCAST(output_dir,len(output_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
     call MPI_BCAST(restart_input_dir,len(restart_input_dir),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
     call MPI_BCAST(motion_file,len(motion_file),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
-    call MPI_BCAST(flow_save_k,1,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
     if(myid.eq.0.and.motion_source_kind.eq.motion_source_file) print*,"Input motion file:",trim(motion_file)
-    if(myid.eq.0.and.motion_source_kind.eq.motion_source_file) print*,"Flow save k:",flow_save_k
     if(myid.eq.0) print*,"Output directory:",trim(output_dir)
 	call MPI_BARRIER(MPI_COMM_WORLD,ierr)
-	layer1(1)=1
+	layer1(1)=max_meshid
 	if (motion_source_kind.eq.motion_source_file) then
 	    call load_motion_table()
-	    call build_motion_step_table(mesh(1)%scale*UU)
+	    call build_motion_step_table(mesh_min_scale*UU)
 			nmax=10 !最大时间迭代步数
 		cycles=0
 			if(goon==.false.)then
@@ -392,19 +397,11 @@ Program LBM
 		move_mesh_time=0.0d0
 		outer_bc_time=0.0d0
 		vor_time=0.0d0
-		pi_save=3.141592653589793d0
-		step_per_time=10000.0d0
-
-		k_save=flow_save_k
-		if(k_save.le.0.0d0) then
-			if(myid.eq.0) write(*,*) '流场保存用的 k 值无效: ', k_save
-			call MPI_FINALIZE(rc)
-			stop 1
-		endif
-		period_step=pi_save/k_save*step_per_time
+        solver_dt=mesh_min_scale*UU
+        if(myid.eq.0) print*, 'Offline flow output times: 30,31,32,33,34,35'
 			call cpu_time(cpu_ts)
 			do !n =1,1000
-				time=dble(n-1)*(mesh(1)%scale*UU)
+				time=dble(n-1)*(mesh_min_scale*UU)
 			if(time.gt.motion_end_time+1.0d-12) exit
 			call MPI_BARRIER(MPI_COMM_WORLD,ierr)
 			call cpu_time(cpu_ts1)
@@ -422,25 +419,7 @@ Program LBM
 			colission_time=colission_time+time_e4-time_s4
 			move_airfoil_time=move_airfoil_time+time_e8-time_s8
 			outer_bc_time=outer_bc_time+time_e9-time_s9
-	        if(body_rel_pos(1).ge.1.0d0) then
-				call cpu_time(time_s11)
-	            call move_mesh(1,mesh)
-				call cpu_time(time_e11)
-	            body_rel_pos(1)=body_rel_pos(1)-1.0d0
-	            call update_body_extra_from_rel()
-	            movenum=movenum+1
-				move_mesh_time=move_mesh_time+time_e11-time_s11
-	            flag2=3
-	        elseif(body_rel_pos(1).le.-1.0d0)then
-				call cpu_time(time_s11)
-	            call move_mesh(-1,mesh)
-				call cpu_time(time_e11)
-	            body_rel_pos(1)=body_rel_pos(1)+1.0d0
-	            call update_body_extra_from_rel()
-	            movenum=movenum-1
-				move_mesh_time=move_mesh_time+time_e11-time_s11
-	            flag2=3
-	        endif
+        ! The four refinement boxes remain fixed in physical coordinates.
 	        if(flag2.gt.0) flag2=flag2-1
 			call cpu_time(time_s10)
 	!        call vor_mom_rate(n,mesh)
@@ -450,25 +429,23 @@ Program LBM
 				if (mod(n,100).eq.0) print*,"已迭代",n,"步，误差为：",err
 	        endif
 
-				flag1=0
-				do icyc=21,30
-					do iph=0,31
-						nsave=nint((dble(icyc-1)+dble(iph)/32.0d0)*period_step)
-						if(iph.eq.0) nsave=nsave+2
-						if(n.eq.nsave) flag1=1
-					enddo
-				enddo
+        ! Offline fixed-time snapshots (completed flow time = n*solver_dt).
+        flag1=0
+        do save_second=30,35
+            nsave=nint(dble(save_second)/solver_dt)
+            if(n.eq.nsave) flag1=1
+        enddo
+        ! End offline fixed-time snapshots.
+
 
 
 	        if((flag1.eq.1).and.(flag2.eq.0))then
 			!if(n.eq.1000)then
-				!$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%pre,mesh(1)%body,mesh(1)%dvordt,xb1,yb1)
 	            call output(n,mesh)
 	            flag1=0
 	        endif
 		!if ((n.eq.916400).or.(n.eq.924400).or.(n.eq.917200).or.(n.eq.926400).or.(n.eq.916800).or.(n.eq.925200)) call output(n,mesh)
 				if(n.eq.motion_step_count) then ! Save restart at the final offline motion step.
-					!$acc update host(mesh(1)%u,mesh(1)%v,mesh(1)%f,mesh(1)%leftf2,mesh(1)%rightf2,mesh(1)%upf2,mesh(1)%downf2,mesh(1)%f0(1:mesh(1)%Nx,1,1:Q),mesh(1)%f0(1:mesh(1)%Nx,mesh(1)%Ny,1:Q),mesh(1)%f0(1,2:mesh(1)%Ny-1,1:Q),mesh(1)%f0(mesh(1)%Nx,2:mesh(1)%Ny-1,1:Q))
 					call saveflowfield(n,mesh)
 				endif
 			n=n+1

@@ -854,7 +854,7 @@ subroutine boundary_condition1 (mesh,shuzu,n) !远场边界条件,特征线边�
 !            if(i.eq.2)print*, mesh(1)%f0(mesh(1)%Nx,mesh(1)%Ny-1,5)
         enddo
 	endif
-    !$acc exit data delete(lx,ly,rhox,rhoy,ux,uy,vx,vy,tempconr,temp1,temp,temp3,temp2,temprho1,tempu1,tempv1,temprho,tempu,tempv,rh,jx,jy,i,i0,j0,k0)
+    !$acc exit data delete(cs,lx,ly,rhox,rhoy,ux,uy,vx,vy,tempconr,temp1,temp,temp3,temp2,temprho1,tempu1,tempv1,temprho,tempu,tempv,rh,jx,jy,i,i0,j0,k0)
 end
     
     
@@ -1526,6 +1526,7 @@ subroutine immersed_boundary_Wu(mesh,h)
     type(cusolverDnHandle) :: h
     logical if_rk4 !是否采用龙格库塔方法求解动力学方程
     
+    if(myid.eq.0) then
     if_rk4=.true.
     smooth=1
     
@@ -1746,6 +1747,7 @@ subroutine immersed_boundary_Wu(mesh,h)
             endif
         endif
     endif 
+    endif ! rank 0 owns the coupled IBM solve
     call MPI_BCAST(body_rel_a,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
     call MPI_BCAST(body_rel_a_prev,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
     call MPI_BCAST(body_rel_v,wing_count,MPI_DOUBLE_PRECISION,0,MPI_COMM_WORLD,ierr)
@@ -1761,7 +1763,9 @@ subroutine immersed_boundary_Wu(mesh,h)
     !$acc update device (body_rel_a,body_rel_a_prev,body_rel_v,body_rel_v_prev,body_rel_s,body_rel_s_prev,body_rel_pos)
     !$acc update device (body_rel_theta,body_rel_theta_prev,body_rel_temp_theta,body_rel_temp_theta_prev)
     !$acc update device (body_extra_v,body_extra_s,body_extra_pos)
+    if(myid.eq.0) then
     !$acc exit data delete (ub,vb,ustar,vstar,bu,bv,xx1,xx2,as,glx,gly,rho_adj,devIpiv,devInfo,Workspace)
+    endif
 end
 
 subroutine matmulvoc(c,a,b,num1,num2)

@@ -10,9 +10,16 @@
 - 翼数量：2
 - 物面边界条件：IBM (`bc_num=4`)
 - 网格尺寸：`width=40`，`height=20`
-- 基础网格步长：`mesh_max_scale=0.01`
+- 四层固定嵌套网格，间距从外到内为 `0.08、0.04、0.02、0.01`
+- 最外层范围：`[-20,20] × [-10,10]`，最细层范围：`[-8,8] × [-4,4]`
 - 流体特征速度：`UU=0.01`
-- 仿真时间步：`dt = mesh_max_scale * UU = 0.0001`
+- 最细层仿真时间步：`dt = mesh_min_scale * UU = 0.0001`，运动输入与在线接口使用此时间步
+
+四层范围、层间交换、输出及续算说明见 [NESTED_GRID.md](./NESTED_GRID.md)。
+
+离线运动文件名不再要求包含 `k...st...`。流场在 `t=30、31、32、33、34、35` 自动各保存一次，
+时间单位与运动文件第一列相同；运动数据必须覆盖所需保存时刻。当前时间步下对应
+`F300000.dat、F310000.dat、F320000.dat、F330000.dat、F340000.dat、F350000.dat`。
 
 ## 1. 目录与主要文件
 
@@ -21,6 +28,8 @@
 - `driver.f90`：在线 ZeroMQ 驱动
 - `zmq_comm.f90`：ZeroMQ 协议解析与回复
 - `solution.f90`：主求解流程、力输出、流场输出
+- `nested_grid.f90`：嵌套层推进、时空插值、MRT 分布函数转换和细到粗回传
+- `nested_io.f90`：去除覆盖区的多层流场输出、四层续算文件
 - `airfoil.f90`：边界读取与翼型几何更新
 - `boundary_condition.f90`：浸没边界、受力和力矩计算
 - `motion_params.dat`：离线模式运动输入
@@ -95,7 +104,7 @@ env -u LBM_MOTION_SOURCE -u LBM_ZMQ_ENDPOINT mpirun -np 1 ./exe
 
 ```fortran
 parameter (wing_count=2)
-parameter (mesh_max_scale=0.01d0)
+parameter (mesh_max_scale=0.08d0)
 parameter (wing_initial_x_origin=0.0d0)
 parameter (wing_initial_x_spacing=1.5d0)
 parameter (wing_initial_y_origin=0.5d0)
@@ -106,6 +115,7 @@ parameter (output_stride_x=2,output_stride_y=2)
 
 - `wing_count`：翼数量
 - `mesh_max_scale`：最外层网格尺寸
+- `mesh_min_scale`：由层数推导的最细层网格尺寸，目前为 `0.01`
 - `wing_initial_x_origin`：在线模式下第 1 个翼的基准 `x`
 - `wing_initial_x_spacing`：在线模式下相邻翼的基准 `x` 间距
 - `wing_initial_y_origin`：在线模式下所有翼共同的基准 `y`
@@ -373,7 +383,7 @@ time
 
 ### 8.3 F<n>.dat
 
-Tecplot 风格流场输出，包含：
+Tecplot 风格流场输出，四层组成 13 个矩形流场 zone，粗层被细层覆盖的面积不重复输出，包含：
 
 - `X`
 - `Y`

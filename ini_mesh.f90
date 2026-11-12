@@ -1,84 +1,78 @@
-Subroutine ini_mesh(n,mesh)	
-	use mpi
-	use com_date
+subroutine ini_mesh(n,mesh)
+    use mpi
+    use com_date
     use meshtype
-	implicit none
+    implicit none
+    integer :: n,k,total
+    real(kind=ps) :: width,height
+    type(mesh_dat) :: mesh(n)
 
-
-	integer n,i,j,k,m,sum
-	type(mesh_dat) mesh(n)
-	real(kind=ps) spacel(5),spacer(5),spaceu(5),spaced(5)
-	real(kind=ps) width,height,qqq,minspace1,minspace2,xo,yo,s1,s2,temp
-	real(kind=ps), parameter :: x_origin_fraction_from_left = 1.0d0 / 3.0d0
-	Real (kind=ps), external :: stret
-
-	!网格范围
-	width=30.0d0
-	height=20.0d0
-
+    if (n.ne.max_meshid.or.numprocs.gt.((nint(40d0/mesh_max_scale)+1)/4)) then
+        if(myid.eq.0) print*, 'Invalid mesh count or too many MPI ranks'
+        call MPI_ABORT(MPI_COMM_WORLD,910,ierr)
+    endif
+    total=0
+    do k=1,n
+        width=grid_xmax(k)-grid_xmin(k)
+        height=grid_ymax(k)-grid_ymin(k)
 	!网格1初始化
-	mesh(1)%meshid=1
-	mesh(1)%layer=1
-	mesh(1)%scale=mesh_max_scale
-	mesh(1)%Nx=nint(width/mesh(1)%scale)+1
-	mesh(1)%Ny=nint(height/mesh(1)%scale)+1
-	mesh(1)%dx=1.0d0
-	mesh(1)%dy=1.0d0
-	mesh(1)%Lx=mesh(1)%dx*dble(mesh(1)%Nx)
-	mesh(1)%Ly=mesh(1)%dy*dble(mesh(1)%Ny)
-	mesh(1)%dt=mesh(1)%dx
-	mesh(1)%c=mesh(1)%dx/mesh(1)%dt
-	mesh(1)%niu=UU*(1.0d0/mesh(1)%scale)/Re
-	mesh(1)%tau_f=3.0d0*mesh(1)%niu+0.5d0
-    allocate(mesh(1)%s(Q))
-	allocate(mesh(1)%body(mesh(1)%Nx,mesh(1)%Ny))	
-	allocate(mesh(1)%left(mesh(1)%Ny,4),mesh(1)%right(mesh(1)%Ny,4),mesh(1)%up(mesh(1)%Nx,4),mesh(1)%down(mesh(1)%Nx,4))	!(:,1)与几号网格邻接；=0，则为数值边界条件，(:,2)是否有对应的临界网格交换点，=0，没有交换点，=1有交换点，(:,3)邻接网格的x编号，(:,4)邻接网格的y编号
-	allocate(mesh(1)%leftf2(2:mesh(1)%Ny-1,Q),mesh(1)%rightf2(2:mesh(1)%Ny-1,Q),mesh(1)%upf2(mesh(1)%Nx,Q),mesh(1)%downf2(mesh(1)%Nx,Q))
-	mesh(1)%ox=-x_origin_fraction_from_left*width
-	mesh(1)%oy=-0.5d0*height
+	mesh(k)%meshid=k
+	mesh(k)%layer=k
+	mesh(k)%scale=mesh_max_scale/2**(k-1)
+	mesh(k)%Nx=nint(width/mesh(k)%scale)+1
+	mesh(k)%Ny=nint(height/mesh(k)%scale)+1
+	mesh(k)%dx=1.0d0
+	mesh(k)%dy=1.0d0
+	mesh(k)%Lx=mesh(k)%dx*dble(mesh(k)%Nx)
+	mesh(k)%Ly=mesh(k)%dy*dble(mesh(k)%Ny)
+	mesh(k)%dt=mesh(k)%dx
+	mesh(k)%c=mesh(k)%dx/mesh(k)%dt
+	mesh(k)%niu=UU*(1.0d0/mesh(k)%scale)/Re
+	mesh(k)%tau_f=3.0d0*mesh(k)%niu+0.5d0
+    allocate(mesh(k)%s(Q))
+	allocate(mesh(k)%body(mesh(k)%Nx,mesh(k)%Ny))
+	allocate(mesh(k)%left(mesh(k)%Ny,4),mesh(k)%right(mesh(k)%Ny,4),mesh(k)%up(mesh(k)%Nx,4),mesh(k)%down(mesh(k)%Nx,4))	!(:,1)与几号网格邻接；=0，则为数值边界条件，(:,2)是否有对应的临界网格交换点，=0，没有交换点，=1有交换点，(:,3)邻接网格的x编号，(:,4)邻接网格的y编号
+	allocate(mesh(k)%leftf2(2:mesh(k)%Ny-1,Q),mesh(k)%rightf2(2:mesh(k)%Ny-1,Q),mesh(k)%upf2(mesh(k)%Nx,Q),mesh(k)%downf2(mesh(k)%Nx,Q))
+	mesh(k)%ox=grid_xmin(k)
+	mesh(k)%oy=grid_ymin(k)
 	!内存分配
-	mesh(1)%start_row=myid*int(mesh(1)%Nx/numprocs)-1
-	mesh(1)%end_row=(myid+1)*int(mesh(1)%Nx/numprocs)
-	if(myid.eq.0) mesh(1)%start_row=1
-	if(myid.ge.numprocs-1) mesh(1)%end_row=mesh(1)%Nx
+	mesh(k)%start_row=myid*int(mesh(k)%Nx/numprocs)-1
+	mesh(k)%end_row=(myid+1)*int(mesh(k)%Nx/numprocs)
+	if(myid.eq.0) mesh(k)%start_row=1
+	if(myid.ge.numprocs-1) mesh(k)%end_row=mesh(k)%Nx
 	if(myid.eq.0) then
-		allocate(mesh(1)%rho(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%u(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%v(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%u0(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%v0(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%pre(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%f(mesh(1)%Nx,mesh(1)%Ny,Q),mesh(1)%f0(mesh(1)%Nx,mesh(1)%Ny,Q),mesh(1)%vor(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%vor1(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%vor2(mesh(1)%Nx,mesh(1)%Ny),mesh(1)%dvordt(mesh(1)%Nx,mesh(1)%Ny))
+		allocate(mesh(k)%rho(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%u(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%v(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%u0(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%v0(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%pre(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%f(mesh(k)%Nx,mesh(k)%Ny,Q),mesh(k)%f0(mesh(k)%Nx,mesh(k)%Ny,Q),mesh(k)%vor(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%vor1(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%vor2(mesh(k)%Nx,mesh(k)%Ny),mesh(k)%dvordt(mesh(k)%Nx,mesh(k)%Ny))
 	else
-		allocate(mesh(1)%rho(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%u(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%v(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%u0(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%v0(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%pre(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%f(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny,Q),mesh(1)%f0(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny,Q),mesh(1)%vor(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%vor1(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%vor2(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny),mesh(1)%dvordt(mesh(1)%start_row:mesh(1)%end_row,mesh(1)%Ny))
+		allocate(mesh(k)%rho(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%u(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%v(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%u0(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%v0(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%pre(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%f(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny,Q),mesh(k)%f0(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny,Q),mesh(k)%vor(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%vor1(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%vor2(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny),mesh(k)%dvordt(mesh(k)%start_row:mesh(k)%end_row,mesh(k)%Ny))
     endif
-	mesh(1)%left=0
-	mesh(1)%right=0
-	mesh(1)%up=0
-	mesh(1)%down=0
+    allocate(mesh(k)%f_old(lbound(mesh(k)%f,1):ubound(mesh(k)%f,1),mesh(k)%Ny,Q))
+	mesh(k)%left=0
+	mesh(k)%right=0
+	mesh(k)%up=0
+	mesh(k)%down=0
 
-!	print*, mesh(7).up(32,:)
-	call allocate_nodes_and_faces_numbers(n,mesh)
-	if(myid.eq.0)then
-		call show_mesh(n,mesh)
-    endif
-
-    mesh(max_meshid)%s(1)=0.0d0
-    mesh(max_meshid)%s(2)=1.1d0
-    mesh(max_meshid)%s(3)=1.05d0
-    mesh(max_meshid)%s(4)=0.0d0
-    mesh(max_meshid)%s(5)=1.2d0
-    mesh(max_meshid)%s(6)=0.0d0
-    mesh(max_meshid)%s(7)=1.2d0
-    mesh(max_meshid)%s(8)=1.0d0/mesh(max_meshid)%tau_f
-    mesh(max_meshid)%s(9)=1.0d0/mesh(max_meshid)%tau_f         
-    sum=0
-    do i=1,max_meshid
-        if(myid.eq.0) write(*,'(a,i3.2,a)') '网格',mesh(i)%meshid,'的信息:'
-        if(myid.eq.0) write(*,'(a,f8.4,a,f8.4,a,f8.4,a,f8.4)') '网格无量纲范围，x：',mesh(i)%ox,'->',mesh(i)%ox+mesh(i)%scale*dble(mesh(i)%Nx-2),'，y：',mesh(i)%oy,'->',mesh(i)%oy+mesh(i)%scale*dble(mesh(i)%Ny-2)
-        if(myid.eq.0) write(*,'(a,i5.4,a,i5.4,a,i8.7,a )') '节点数：',mesh(i)%Nx,'×',mesh(i)%Ny,'，共',mesh(i)%Nx*mesh(i)%Ny,'个节点'
-        if(myid.eq.0) print*,'松弛因子为:'
-        if(myid.eq.0) write(*,'(a,f6.4,a,f6.4,a,f6.4)') 's1=',mesh(i)%s(1),'   s2=',mesh(i)%s(2),'   s3=',mesh(i)%s(3)
-        if(myid.eq.0) write(*,'(a,f6.4,a,f6.4,a,f6.4)') 's4=',mesh(i)%s(4),'   s5=',mesh(i)%s(5),'   s6=',mesh(i)%s(6)
-        if(myid.eq.0) write(*,'(a,f6.4,a,f6.4,a,f6.4)') 's7=',mesh(i)%s(7),'   s8=',mesh(i)%s(8),'   s9=',mesh(i)%s(9)
-        sum=sum+mesh(i)%Nx*mesh(i)%Ny   
+        mesh(k)%s=(/0d0,1.1d0,1.05d0,0d0,1.2d0,0d0,1.2d0, &
+                    1d0/mesh(k)%tau_f,1d0/mesh(k)%tau_f/)
+        mesh(k)%body=0
+        mesh(k)%vor=0d0
+        mesh(k)%vor1=0d0
+        mesh(k)%vor2=0d0
+        mesh(k)%dvordt=0d0
+        mesh(k)%nodescounts=mesh(k)%Nx*mesh(k)%Ny
+        mesh(k)%facecounts=(mesh(k)%Nx-1)*(mesh(k)%Ny-1)
+        mesh(k)%start_num=total
+        total=total+mesh(k)%nodescounts
+        if (myid.eq.0) then
+            print*, 'Level',k,' Nx,Ny=',mesh(k)%Nx,mesh(k)%Ny
+            print*, ' x=',grid_xmin(k),grid_xmax(k),' y=',grid_ymin(k),grid_ymax(k)
+            print*, ' spacing=',mesh(k)%scale,' physical dt=',UU*mesh(k)%scale,' tau=',mesh(k)%tau_f
+        endif
     enddo
-    if(myid.eq.0) print*,'本次计算的总网格节点数为',sum
-endsubroutine
+    if(myid.eq.0) then
+        print*, 'Total stored mesh nodes:',total
+        call show_mesh(n,mesh)
+    endif
+end subroutine ini_mesh
 
 real*8 function stret(m,smin,smax,ss)
 	integer m,ii
@@ -105,7 +99,7 @@ real*8 function stret(m,smin,smax,ss)
 		else
 			stret=(smax-smin)/smin
 			return
-		endif 
+		endif
 	else
 		eps=0.000001
 		ss(1)=0.0
@@ -125,7 +119,7 @@ real*8 function stret(m,smin,smax,ss)
 					do ii=2,(m-1)
 						ss(ii)=ss(ii-1)+smin*(((a+b)/2)**(ii-2))
 					enddo
-					ss(m)=smax	
+					ss(m)=smax
 					return
 				elseif(temp>0) then
 					b=(a+b)/2
@@ -141,7 +135,7 @@ real*8 function stret(m,smin,smax,ss)
 					ss(m)=smax
 					return
 				endif
-			enddo  		  		 			
+			enddo
 		endif
 	endif
 end function stret
@@ -163,7 +157,7 @@ subroutine show_mesh(n,mesh)
 		do J=1,mesh(m)%Ny
 			do I=1,mesh(m)%Nx
 				WRITE(290,*) mesh(m)%ox+dble(i-1)*mesh(m)%scale,mesh(m)%oy+dble(j-1)*mesh(m)%scale
-            enddo	
+            enddo
 		enddo
 	enddo
 
@@ -206,5 +200,5 @@ subroutine allocate_nodes_and_faces_numbers(n,mesh)
 			if((mod(mesh(i)%meshid,4).eq.2).or.(mod(mesh(i)%meshid,4).eq.0)) mesh(i)%facecounts=mesh(i)%facecounts+ie-is
 		endif
 	enddo
-    
+
 endsubroutine

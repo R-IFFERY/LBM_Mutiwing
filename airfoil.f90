@@ -242,6 +242,7 @@ subroutine read_boundary(mesh)
 end subroutine
 
 subroutine move_boundary(mesh)
+    use mpi
 	use com_date
     use meshtype
 	implicit none
@@ -249,7 +250,23 @@ subroutine move_boundary(mesh)
 	type(mesh_dat) mesh
 	integer i0,i1,i2,j1,j2,i,j,wing,point_start,seg_start
 	real(kind=ps) temp,temp1
+    real(kind=ps) :: check_x,check_y,margin
 	
+    ! Keep the complete five-point IBM kernel inside the finest interior.
+    margin=3.5d0*mesh%scale
+    do wing=1,wing_count
+        point_start=wing_point_start(wing)
+        do i0=point_start,point_start+boundary_points_per_wing-1
+            check_x=cos(angle_arr(wing))*xb0(i0)+sin(angle_arr(wing))*yb0(i0) &
+                +wing_initial_x_origin+(wing-1)*wing_initial_x_spacing+sa_arr(wing)+xc+body_extra_s(wing)*mesh%scale
+            check_y=-sin(angle_arr(wing))*xb0(i0)+cos(angle_arr(wing))*yb0(i0)+wing_initial_y_origin+sb_arr(wing)+yc
+            if(check_x.lt.mesh%ox+margin.or.check_x.gt.mesh%ox+(mesh%Nx-1)*mesh%scale-margin.or. &
+               check_y.lt.mesh%oy+margin.or.check_y.gt.mesh%oy+(mesh%Ny-1)*mesh%scale-margin) then
+                if(myid.eq.0) print*, 'Wing',wing,'leaves finest mesh IBM support at time',time,check_x,check_y
+                call MPI_ABORT(MPI_COMM_WORLD,913,ierr)
+            endif
+        enddo
+    enddo
 	!$acc update device (angle_arr,sa_arr,sb_arr,body_extra_s,movenum)
 	!$acc kernels present(xb0,yb0,xb1,yb1,xb2,yb2,angle_arr,sa_arr,sb_arr,body_extra_s,mesh,movenum,adjoint_p,adjoint_wing_id,gforce,adjoint_n)
 	!$acc loop seq

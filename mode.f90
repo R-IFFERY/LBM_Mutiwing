@@ -127,34 +127,36 @@ subroutine resolve_offline_motion_file(case_name)
 
         motion_file = 'input/' // trim(filename)
     endif
-    k_pos = 0
-    st_pos = 0
-    do i = 1, len_trim(filename)
-        if ((filename(i:i) .eq. 'k') .or. (filename(i:i) .eq. 'K')) then
-            k_pos = i
-            exit
-        endif
-    enddo
-    if (k_pos .gt. 0) then
-        do i = k_pos + 1, len_trim(filename) - 1
-            if (((filename(i:i) .eq. 's') .or. (filename(i:i) .eq. 'S')) .and. &
-                ((filename(i+1:i+1) .eq. 't') .or. (filename(i+1:i+1) .eq. 'T'))) then
-                st_pos = i
-                exit
-            endif
-        enddo
-    endif
-    if ((k_pos .lt. 1) .or. (st_pos .le. k_pos + 1)) then
-        write(*,*) '无法从输入文件名解析流场保存用的 k 值，文件名应类似 k2.0st0.2.dat: ', trim(filename)
-        stop 1
-    endif
-
-    k_text = filename(k_pos+1:st_pos-1)
-    read(k_text, *, iostat=ios) flow_save_k
-    if ((ios .ne. 0) .or. (flow_save_k .le. 0.0d0)) then
-        write(*,*) '输入文件名中的 k 值无效: ', trim(k_text), ' file=', trim(filename)
-        stop 1
-    endif
+    ! Disabled: offline flow output now uses fixed times 30,31,...,35.
+    ! The motion filename no longer needs a k...st... marker.
+!    k_pos = 0
+!    st_pos = 0
+!    do i = 1, len_trim(filename)
+!        if ((filename(i:i) .eq. 'k') .or. (filename(i:i) .eq. 'K')) then
+!            k_pos = i
+!            exit
+!        endif
+!    enddo
+!    if (k_pos .gt. 0) then
+!        do i = k_pos + 1, len_trim(filename) - 1
+!            if (((filename(i:i) .eq. 's') .or. (filename(i:i) .eq. 'S')) .and. &
+!                ((filename(i+1:i+1) .eq. 't') .or. (filename(i+1:i+1) .eq. 'T'))) then
+!                st_pos = i
+!                exit
+!            endif
+!        enddo
+!    endif
+!    if ((k_pos .lt. 1) .or. (st_pos .le. k_pos + 1)) then
+!        write(*,*) '无法从输入文件名解析流场保存用的 k 值，文件名应类似 k2.0st0.2.dat: ', trim(filename)
+!        stop 1
+!    endif
+!
+!    k_text = filename(k_pos+1:st_pos-1)
+!    read(k_text, *, iostat=ios) flow_save_k
+!    if ((ios .ne. 0) .or. (flow_save_k .le. 0.0d0)) then
+!        write(*,*) '输入文件名中的 k 值无效: ', trim(k_text), ' file=', trim(filename)
+!        stop 1
+!    endif
 
     case_name = trim(filename)
     dot_pos = 0
